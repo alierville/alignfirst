@@ -284,6 +284,33 @@ describe("shared runner helpers", () => {
     },
   );
 
+  it("keeps the machine awake for the agent's lifetime", async () => {
+    const { config } = makeRun();
+    const events: string[] = [];
+    let agentPid: number | undefined;
+    const spawnProcess: SpawnAgentProcess = (command, args, options) => {
+      const child = nodeFixture('process.stdout.write("");')(command, args, options);
+      agentPid = child.pid;
+      child.on("close", () => events.push("agent closed"));
+      return child;
+    };
+    await runAgent(config, createCodexAdapter(), makeSink(), spawnProcess, (pid) => {
+      events.push(`inhibit ${pid === agentPid}`);
+      return () => events.push("release");
+    });
+    expect(events).toEqual(["inhibit true", "agent closed", "release"]);
+  });
+
+  it("skips the sleep assertion when the agent fails to spawn", async () => {
+    const { config } = makeRun();
+    const spawnProcess: SpawnAgentProcess = (_command, args, options) =>
+      spawn("aligndev-missing-executable", args, options);
+    const result = await runAgent(config, createCodexAdapter(), makeSink(), spawnProcess, () => {
+      throw new Error("must not inhibit sleep");
+    });
+    expect(result.status).toBe("failed");
+  });
+
   it.each([false, true])("records a failed prompt pipe with quiet=%s", async (quiet) => {
     const { config, sessionFilePath } = makeRun();
     config.quiet = quiet;

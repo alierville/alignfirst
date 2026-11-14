@@ -48,6 +48,8 @@ Playbook-topic rendering reads no project report and performs no guide-file disc
 
 `aligndev code` runs the agent as a direct **foreground** child until it exits. It writes the transcript to a durable per-run file and, unless `--quiet` is given, streams it to stdout. Quiet mode keeps the initial `Session file:` line, new child `Session ID:` and failure diagnostics. The CLI never backgrounds or detaches itself.
 
+On macOS, the run holds `caffeinate -i -w <agent pid>` for the agent's lifetime: headless agents such as `claude -p` hold no sleep assertion, and a sleeping Mac suspends the run and drops its API stream. `-i` prevents idle sleep only; closing the lid on battery still sleeps. A missing or failing `caffeinate` does not affect the run.
+
 - Under OpenClaw, the assistant runs it through `exec` with `background: true` and `timeoutSeconds: 0`, and chains `openclaw system event --mode now --session-key <key>` onto the command.
 - Claude Code parents launch with `run_in_background` and an explicit `timeout` set to the maximum stated by their Bash tool. Claude Code wakes the parent on exit.
 - Codex parents retain their established background facility; where no completion bridge is configured, they use the next-user-turn status fallback. Claude Code/Codex retain their sandbox elevation. Pi work does not certify or replace these integrations.

@@ -120,14 +120,18 @@ export type SpawnAgentProcess = (
   },
 ) => ChildProcess;
 
+// Holds a sleep assertion while the agent with this PID runs. Returns its release function.
+export type InhibitSleep = (agentPid: number) => () => void;
+
 export async function runAgent(
   config: RunConfig,
   adapter: AgentAdapter,
   out: Output,
   spawnProcess: SpawnAgentProcess = spawnDirectChild,
+  inhibitSleep: InhibitSleep = preventIdleSleep,
 ): Promise<RunResult> {
   const state = adapter.createState(config);
-  const outcome = await spawnAgent(config, adapter, state, out, spawnProcess);
+  const outcome = await spawnAgent(config, adapter, state, out, spawnProcess, inhibitSleep);
   const assessment = adapter.assess(state);
   const failed = outcome.exitCode !== 0 || !assessment.succeeded;
   // Authentication evidence matters only when the run failed. Claude can recover after retrying
@@ -171,6 +175,24 @@ function spawnDirectChild(
   return spawn(command, args, options);
 }
 
+// `claude -p` and the other headless agents hold no sleep assertion, so a sleeping Mac suspends
+// the run and drops its API stream. `-i` prevents idle sleep only; `-w` ends caffeinate with the
+// agent. A missing or failing caffeinate never affects the run.
+function preventIdleSleep(agentPid: number): () => void {
+  if (process.platform !== "darwin") return () => {};
+  const caffeinate = spawn("caffeinate", ["-i", "-w", String(agentPid)], { stdio: "ignore" });
+  caffeinate.on("error", () => {});
+  caffeinate.unref();
+  return () => {
+    if (caffeinate.exitCode !== null || caffeinate.signalCode !== null) return;
+    try {
+      caffeinate.kill("SIGTERM");
+    } catch {
+      // caffeinate exited between the liveness check and the signal.
+    }
+  };
+}
+
 interface ProcessOutcome {
   exitCode: number | null;
   stderr: string;
@@ -203,12 +225,16 @@ function spawnAgent(
   state: AgentProtocolState,
   out: Output,
   spawnProcess: SpawnAgentProcess,
+  inhibitSleep: InhibitSleep,
 ): Promise<ProcessOutcome> {
   const child = spawnProcess(adapter.executable, adapter.buildArgs(config), {
     cwd: config.cwd,
     env: config.env,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const releaseSleep = child.pid === undefined ? () => {} : inhibitSleep(child.pid);
+  // Signal handlers end with `process.exit`, so this also covers interrupted runs.
+  process.on("exit", releaseSleep);
   const detachChildGuards = guardChildLifecycle(child, config.sessionFilePath, state);
   let buffer = "";
   let stderr = "";
@@ -228,6 +254,8 @@ function spawnAgent(
       if (settled) return;
       settled = true;
       detachChildGuards();
+      process.off("exit", releaseSleep);
+      releaseSleep();
       resolve(outcome);
     };
     child.on("close", (code) => {
